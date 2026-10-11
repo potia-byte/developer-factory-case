@@ -28,8 +28,9 @@
 ## 2. Как устроено
 
 TypeScript-пакет `tools/dev-factory` (Zod, Node child processes), состояние в `.dev-factory/state.json` под файловым
-замком с атомарной записью; вызывается npm-скриптами `factory:*`. Это не сервер; демон — только отдельный read-only
-дашборд `apps/factory-dashboard` (`docs/factory-v2/FACTORY_V2_ARCHITECTURE.md` §1).
+замком с атомарной записью; вызывается npm-скриптами `factory:*`. Это не сервер; демон — отдельный дашборд
+`apps/factory-dashboard`: в основном просмотр состояния; также есть управление запуском (по `lifecycle.ts`) — не проверено
+в этой витрине (`docs/factory-v2/FACTORY_V2_ARCHITECTURE.md` §1).
 
 ### 2.1 Роли агентов
 
@@ -42,7 +43,7 @@ TypeScript-пакет `tools/dev-factory` (Zod, Node child processes), сост�
 | QA | Независимый Harness (проверки привязаны к base+candidate коммитам) и независимое QA-ревью в read-only режиме | `quality-gate.ts`, `security-policy.ts` | есть |
 | Ремонт | Классификатор причин падения и политика ретраев | `failure-classifier.ts`, `retry-policy.ts` | частично: подзадачи ремонта (`repair-subtask.ts`, `integration-repair.ts`) только в несмерженной ветке |
 | Надёжность рантайма | Heartbeat, PID-lock, восстановление после рестарта, cooldown по квотам | `runtime-health.ts`, `durable-worker.ts`, `quota.ts`, `atomic-file.ts` | есть |
-| Оркестратор DAG | Параллельные воркеры в git-worktree, очередь интеграции | `orch-*.ts`, `integration-*.ts` | **нет в `test-launch`** (только ветка) |
+| Оркестратор DAG | Roadmap: параллельные воркеры в git-worktree и очередь интеграции | `orch-*.ts`, `integration-*.ts` | **нет в `test-launch`** (только несмерженная ветка) |
 
 ### 2.2 Поток задачи: от бэклога до проверки
 
@@ -84,6 +85,20 @@ flowchart TD
 | `agent-runtime` | Runtime health, durable worker, атомарные файлы, квоты | `runtime-health.ts`, `durable-worker.ts`, `atomic-file.ts`, `quota.ts` |
 | `lead-hunter` | **Относится к продажам, не к самой фабрике.** Read-only поиск рекламодателей GiftQuest в Telegram; использует пул моделей фабрики | `tools/tg-harness/src/lead-hunter` |
 
+### 2.4 Границы автономности
+
+Ниже описано поведение **обобщённых** модулей из репозитория `quality-gate`, а не недоступных оригиналов фабрики.
+Это регэксп-эвристики: возможны ложные срабатывания; они не являются песочницей.
+
+| Категория | Что происходит |
+|---|---|
+| Низкорисковая задача | Только задача без сработавших сигналов, с критериями и проверками и не более чем с 5 разрешёнными путями получает `low`; это кандидат на автоодобрение. Дополнительные лимиты фабрики: не более 3 за цикл и 8 за сессию. [risk-policy.ts](https://github.com/potia-byte/quality-gate/blob/main/src/risk-policy.ts), [config.ts](https://github.com/potia-byte/quality-gate/blob/main/src/config.ts) |
+| Деньги, продакшн/деплой, секреты, удаление данных, миграции, безопасность/права, push и необратимые либо внешние действия | Это сигналы `high`, исключающие низкорисковое автоодобрение и требующие ручного решения. [risk-policy.ts](https://github.com/potia-byte/quality-gate/blob/main/src/risk-policy.ts) |
+| Команды чтения и локальных проверок | `git status`/`diff`/`log`, `npx vitest run` и настроенный список `npm`-скриптов классифицируются как `SAFE`. [security-policy.ts](https://github.com/potia-byte/quality-gate/blob/main/src/security-policy.ts), [config.ts](https://github.com/potia-byte/quality-gate/blob/main/src/config.ts) |
+| Прочие команды и непроверенный внешний код | Команда вне allowlist получает `REQUIRES_REVIEW`; установка или запуск кода с уровнем `UNTRUSTED_EXTERNAL` также требует ревью до выполнения. [security-policy.ts](https://github.com/potia-byte/quality-gate/blob/main/src/security-policy.ts) |
+| Секреты, выход за разрешённые рабочие каталоги, подозрительная выгрузка и опасные команды | По умолчанию `DENIED`: секретные пути, внешние/неразрешённые выгрузки, force-push, `reset --hard`, принудительная очистка, команды форматирования диска и скачивание с немедленным выполнением. [security-policy.ts](https://github.com/potia-byte/quality-gate/blob/main/src/security-policy.ts) |
+| Недоверенный внешний текст | Помечается `UNTRUSTED_EXTERNAL` и оборачивается как данные: его инструкции не дают права раскрывать секреты, расширять полномочия, отключать проверки, выполнять команды или отправлять данные. [security-policy.ts](https://github.com/potia-byte/quality-gate/blob/main/src/security-policy.ts) |
+
 ## 3. Ключевые решения и почему
 
 | Решение | Почему (по документам) | Источник |
@@ -119,7 +134,7 @@ flowchart TD
 | Автопилот (последовательный, ночной режим) | **есть в коде и тестах**; сейчас `stopped` | один активный run за раз (`FACTORY_V2_ARCHITECTURE.md` §1) |
 | Quality gate (Harness + QA + политики) | **есть**, 1 тест падает по таймауту на Windows | `STATUS_REPORT.md` §3.1 |
 | Runtime health / durable worker | **есть**, `runtime-health.test` 1504 строк | `STATUS_REPORT.md` §3.1; `runtime-snapshot.ts` только на ветке |
-| Дашборд `apps/factory-dashboard` | **есть**, read-only UI | один тест (lifecycle) падает по EPERM |
+| Дашборд `apps/factory-dashboard` | **есть**, в основном просмотр состояния; также есть управление запуском (по `lifecycle.ts`) — не проверено в этой витрине | один тест (`lifecycle`) падает по EPERM |
 | Ремонт через Codex отдельным модулем | **не найден в `test-launch`** | классификатор и политика есть; ремонт-подзадачи — в ветке |
 | **DAG-оркестратор (параллельные воркеры)** | **roadmap для основной ветки** | существует только в несмерженной ветке `factory-v2-p8-6-model-pool`; собственный лог помечает слияние «Not attempted» |
 | **Chaos / long-run (фаза 8.7)** | **roadmap, не реализовано** | ни кода, ни тестов ни в одной ветке; есть только описание `p8-7` в `FACTORY_V2_ROADMAP.md` |
